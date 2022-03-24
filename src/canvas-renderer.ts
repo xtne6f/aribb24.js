@@ -1,4 +1,4 @@
-import CanvasProvider from './canvas-provider'
+import { default as CanvasProvider, ProviderLanguageInfo } from './canvas-provider'
 import HighResTextTrack from './utils/high-res-texttrack'
 import DummyCue from './utils/dummy-cue'
 import { readID3Size, binaryISO85591ToString, binaryUTF8ToString, base64ToUint8Array} from './utils/binary'
@@ -42,6 +42,7 @@ export default class CanvasID3Renderer {
   private isShowing: boolean = true
   private isOnSeeking: boolean = false
   private onB24CueChangeDrawed: boolean = false
+  private lastLanguageInfo: ProviderLanguageInfo | null = null
 
   private readonly onID3AddtrackHandler: ((event: TrackEvent) => void) = this.onID3Addtrack.bind(this);
   private readonly onID3CueChangeHandler: (() => void) = this.onID3CueChange.bind(this);
@@ -103,6 +104,7 @@ export default class CanvasID3Renderer {
     this.prevCurrentTime = null;
 
     this.media = this.subtitleElement = null
+    this.lastLanguageInfo = null
   }
 
   public dispose(): void {
@@ -153,7 +155,14 @@ export default class CanvasID3Renderer {
   }
 
   public pushRawData(pts: number, data: Uint8Array): boolean {
-    const provider: CanvasProvider = new CanvasProvider(data, pts);
+    const data_group_id = CanvasProvider.detect(data, this.rendererOption)
+    if (data_group_id === 0) {
+      this.lastLanguageInfo = CanvasProvider.checkManagementData(data, this.rendererOption)
+      return true
+    }
+    if (!data_group_id || !this.lastLanguageInfo) { return false; }
+
+    const provider: CanvasProvider = new CanvasProvider(data, pts, this.lastLanguageInfo);
     const estimate = provider.render({
       ... this.rendererOption,
       width: undefined, // ここはデフォルト値で負荷を軽くする
@@ -335,12 +344,13 @@ export default class CanvasID3Renderer {
 
   private addB24Cue (start_time: number, end_time: number, data: Uint8Array): boolean {
     if (!this.b24Track) { return false; }
-    if (!CanvasProvider.detect(data, this.rendererOption)) { return false; }
+    if ((CanvasProvider.detect(data, this.rendererOption) ?? 0) === 0) { return false; }
 
     const CueClass = window.VTTCue ?? window.TextTrackCue
 
     const b24_cue = new CueClass(start_time, end_time, '');
     (b24_cue as any).data = data;
+    (b24_cue as any).languageInfo = this.lastLanguageInfo;
 
     if (window.VTTCue) {
       this.b24Track.addCue(b24_cue)
@@ -394,7 +404,7 @@ export default class CanvasID3Renderer {
       if ((lastCue.startTime <= this.media.currentTime && this.media.currentTime <= lastCue.endTime) && !this.isOnSeeking) {
         // なんか Win Firefox で Cue が endTime 過ぎても activeCues から消えない場合があった、バグ?
 
-        const provider: CanvasProvider = new CanvasProvider(lastCue.data, lastCue.startTime);
+        const provider: CanvasProvider = new CanvasProvider(lastCue.data, lastCue.startTime, lastCue.languageInfo);
         let rendered = false
 
         if (this.isShowing && this.viewCanvas) {
@@ -560,6 +570,7 @@ export default class CanvasID3Renderer {
 
   private onSeeking() {
     this.isOnSeeking = true
+    this.lastLanguageInfo = null
     this.onB24CueChange()
   }
 
@@ -614,7 +625,7 @@ export default class CanvasID3Renderer {
       if ((lastCue.startTime <= this.media.currentTime && this.media.currentTime <= lastCue.endTime) && !this.isOnSeeking) {
         // なんか Win Firefox で Cue が endTime 過ぎても activeCues から消えない場合があった、バグ?
 
-        const provider: CanvasProvider = new CanvasProvider(lastCue.data, lastCue.startTime);
+        const provider: CanvasProvider = new CanvasProvider(lastCue.data, lastCue.startTime, lastCue.languageInfo);
 
         if (this.isShowing && this.viewCanvas) {
           provider.render({

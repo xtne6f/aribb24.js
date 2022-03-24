@@ -1,4 +1,4 @@
-import SVGProvider from './svg-provider'
+import { default as SVGProvider, ProviderLanguageInfo } from './svg-provider'
 import HighResTextTrack from './utils/high-res-texttrack'
 import DummyCue from './utils/dummy-cue'
 import { readID3Size, binaryISO85591ToString, binaryUTF8ToString, base64ToUint8Array} from './utils/binary'
@@ -35,6 +35,7 @@ export default class SVGRenderer {
   private isShowing: boolean = true
   private isOnSeeking: boolean = false
   private onB24CueChangeDrawed: boolean = false
+  private lastLanguageInfo: ProviderLanguageInfo | null = null
 
   private readonly onID3AddtrackHandler: ((event: TrackEvent) => void) = this.onID3Addtrack.bind(this);
   private readonly onID3CueChangeHandler: (() => void) = this.onID3CueChange.bind(this);
@@ -101,6 +102,7 @@ export default class SVGRenderer {
     this.prevCurrentTime = null;
 
     this.media = this.subtitleElement = null
+    this.lastLanguageInfo = null
   }
 
   public dispose(): void {
@@ -132,7 +134,14 @@ export default class SVGRenderer {
   }
 
   public pushRawData(pts: number, data: Uint8Array): boolean {
-    const provider: SVGProvider = new SVGProvider(data, pts);
+    const data_group_id = SVGProvider.detect(data, this.rendererOption)
+    if (data_group_id === 0) {
+      this.lastLanguageInfo = SVGProvider.checkManagementData(data, this.rendererOption)
+      return true
+    }
+    if (!data_group_id || !this.lastLanguageInfo) { return false; }
+
+    const provider: SVGProvider = new SVGProvider(data, pts, this.lastLanguageInfo);
     const estimate = provider.render({
       ... this.rendererOption,
     })
@@ -312,12 +321,13 @@ export default class SVGRenderer {
 
   private addB24Cue (start_time: number, end_time: number, data: Uint8Array): boolean {
     if (!this.b24Track) { return false; }
-    if (!SVGProvider.detect(data, this.rendererOption)) { return false; }
+    if ((SVGProvider.detect(data, this.rendererOption) ?? 0) === 0) { return false; }
 
     const CueClass = window.VTTCue ?? window.TextTrackCue
 
     const b24_cue = new CueClass(start_time, end_time, '');
     (b24_cue as any).data = data;
+    (b24_cue as any).languageInfo = this.lastLanguageInfo;
 
     if (window.VTTCue) {
       this.b24Track.addCue(b24_cue)
@@ -361,7 +371,7 @@ export default class SVGRenderer {
       if ((lastCue.startTime <= this.media.currentTime && this.media.currentTime <= lastCue.endTime) && !this.isOnSeeking) {
         // なんか Win Firefox で Cue が endTime 過ぎても activeCues から消えない場合があった、バグ?
 
-        const provider: SVGProvider = new SVGProvider(lastCue.data, lastCue.startTime);
+        const provider: SVGProvider = new SVGProvider(lastCue.data, lastCue.startTime, lastCue.languageInfo);
         let rendered = false
 
         if (this.isShowing) {
@@ -523,6 +533,7 @@ export default class SVGRenderer {
 
   private onSeeking() {
     this.isOnSeeking = true
+    this.lastLanguageInfo = null
     this.onB24CueChange()
   }
 
