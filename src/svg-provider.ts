@@ -45,6 +45,12 @@ export interface ProviderResult {
   PRA: number | null
 }
 
+export interface ProviderLanguageInfo {
+  ucs: boolean,
+  languageCode: string,
+}
+
+
 export default class SVGProvider {
   private pes: Uint8Array
   private svg: SVGElement | null = null
@@ -119,9 +125,13 @@ export default class SVGProvider {
 
   private usePUA: boolean = false
 
-  public constructor(pes: Uint8Array, pts: number) {
+  private languageInfo: ProviderLanguageInfo
+  private static unicodeToPUAMapping: Map<string, string> | null = null
+
+  public constructor(pes: Uint8Array, pts: number, languageInfo: ProviderLanguageInfo) {
     this.pes = pes
     this.startTime = pts
+    this.languageInfo = languageInfo
   }
 
   public static setEmbeddedGlyph(embeded: Map<string, PathElement>): void {
@@ -181,32 +191,68 @@ export default class SVGProvider {
     this.position_y = this.position_y + this.height()
   }
 
-  public static detect(pes: Uint8Array , option?: ProviderOption): boolean {
+  public static detect(pes: Uint8Array , option?: ProviderOption): number | null {
     const purpose_data_identifier = option?.data_identifier ?? 0x80; // default: caption
     const purpose_data_group_id = option?.data_group_id ?? 0x01; // default: 1st language
 
-    if (pes.length <= 0) { return false; }  
+    if (pes.length <= 0) { return null; }
     const data_identifier = pes[0];
     if(data_identifier !== purpose_data_identifier){
-      return false;
+      return null;
     }
 
-    if (pes.length <= 2) { return false; }
+    if (pes.length <= 2) { return null; }
     const PES_data_packet_header_length = pes[2] & 0x0F;
     const data_group_begin = (3 + PES_data_packet_header_length);
-    if (pes.length <= data_group_begin) { return false; }
+    if (pes.length <= data_group_begin) { return null; }
     const data_group_id = (pes[data_group_begin + 0] & 0xFC) >> 2;
 
-    if ((data_group_id & 0x0F) !== purpose_data_group_id) {
-      return false
+    if ((data_group_id & 0x0F) !== 0 && (data_group_id & 0x0F) !== purpose_data_group_id) {
+      // 字幕管理でも目的の字幕文でもない
+      return null
     }
 
     if (CRC16(pes, data_group_begin) !== 0) {
-      //return false; // CRCチェックに失敗する事があるため無効
-      return true;
+      //return null; // CRCチェックに失敗する事があるため無効
+      return data_group_id & 0x0F;
     } else {
-      return true;
+      return data_group_id & 0x0F;
     }
+  }
+
+  public static checkManagementData(pes: Uint8Array, option?: ProviderOption): ProviderLanguageInfo | null {
+    const purpose_data_group_id = option?.data_group_id ?? 0x01; // default: 1st language
+    const PES_data_packet_header_length = pes[2] & 0x0F
+    const data_group_begin = (3 + PES_data_packet_header_length)
+    const data_group_size = (pes[data_group_begin + 3] << 8) + pes[data_group_begin + 4]
+    const TMD = pes[data_group_begin + 5] >> 6
+
+    let language_unit = data_group_begin + 6 + (TMD === 2 ? 5 : 0)
+    const num_languages = pes[language_unit++]
+    for (let i = 0; i < num_languages && language_unit < data_group_begin + 5 + data_group_size; i++) {
+      const language_tag = pes[language_unit] >> 5
+      const DMF = pes[language_unit++] & 0x0F
+      if (12 <= DMF && DMF <= 14) {
+        language_unit++
+      }
+      if (language_unit + 3 >= data_group_begin + 5 + data_group_size) {
+        break
+      }
+      if (language_tag === purpose_data_group_id - 1) {
+        // 厳密にはここで表示書式の初期値も取得すべき
+        const TCS = (pes[language_unit + 3] >> 2) & 0x03
+        return {
+          ucs: TCS === 1,
+          languageCode: String.fromCharCode(pes[language_unit], pes[language_unit + 1], pes[language_unit + 2]),
+        }
+      }
+      language_unit += 4
+    }
+    // 厳密にはこれに続くデータユニットも見るべきだが、たいてい空だと思う
+    // Cプロファイル(ワンセグ)では送出頻度の関係で既定(固定)の字幕管理の利用を検討すべきだが
+    // そもそもCプロファイルを想定してなさそうなので省略する
+
+    return null
   }
 
   public render(option?: ProviderOption): ProviderResult | null {
@@ -232,7 +278,8 @@ export default class SVGProvider {
     this.usePUA = option?.usePUA ?? false
     // その他オプション類終わり
 
-    if (!SVGProvider.detect(this.pes, option)) {
+    if ((SVGProvider.detect(this.pes, option) ?? 0) === 0) {
+      // 字幕文でない
       return null;
     }
 
@@ -246,15 +293,16 @@ export default class SVGProvider {
     const data_group_begin = (3 + PES_data_packet_header_length)
     const data_group_id = (this.pes[data_group_begin + 0] & 0xFC) >> 2
     const data_group_size = (this.pes[data_group_begin + 3] << 8) + this.pes[data_group_begin + 4]
+    const TMD = this.pes[data_group_begin + 5] >> 6
 
-    let data_unit = data_group_begin + 9
+    let data_unit = data_group_begin + 9 + (TMD === 1 || TMD === 2 ? 5 : 0)
     while (data_unit < data_group_begin + (5 + data_group_size)) {
       const unit_separator = this.pes[data_unit + 0]
       const data_unit_parameter = this.pes[data_unit + 1]
       const data_unit_size = (this.pes[data_unit + 2] << 16) | (this.pes[data_unit + 3] << 8) | this.pes[data_unit + 4]
 
       if (data_unit_parameter === 0x20) {
-        this.parseText(data_unit + 5, data_unit + 5 + data_unit_size)
+        this.parseText(data_unit + 5, data_unit + 5 + data_unit_size, this.languageInfo.ucs)
       }else if (data_unit_parameter == 0x30) {
         this.parseDRCS(1, data_unit + 5, data_unit + 5 + data_unit_size)
       }else if (data_unit_parameter == 0x31) {
@@ -274,11 +322,17 @@ export default class SVGProvider {
     })
   }
 
-  private parseText(begin: number, end: number): void {
+  private parseText(begin: number, end: number, ucs: boolean): void {
     while (begin < end) {
+      if (ucs && this.pes[begin] === 0xC2 && begin + 1 < end &&
+          0x80 <= this.pes[begin + 1] && this.pes[begin + 1] <= 0x9F) {
+        // UTF-8 の C1
+        ++begin
+      }
+
       if (0x20 < this.pes[begin] && this.pes[begin] < 0x7F) {
         let key = 0
-        const entry = this.G_BACK[this.GL]
+        const entry = ucs ? G_SET_BY_ALPHABET.get(ALPHABETS.ASCII) : this.G_BACK[this.GL]
         if(!entry){ return }
 
         for(let i = 0; i < entry.bytes; i++){
@@ -288,16 +342,49 @@ export default class SVGProvider {
         this.renderCharacter(key, entry)
         begin += entry.bytes
       } else if (0xA0 < this.pes[begin] && this.pes[begin] < 0xFF) {
-        let key = 0
-        const entry = this.G_BACK[this.GR]
-        if(!entry){ return }
+        if (ucs) {
+          const cx = this.pes[begin]
+          const cy = this.pes[begin + 1]
+          const cz = this.pes[begin + 2]
+          const cw = this.pes[begin + 3]
+          if (0xC2 <= cx && cx < 0xE0 && begin + 1 < end &&
+              0x80 <= cy && cy < 0xC0) {
+            // 2 bytes UTF-8
+            this.renderCharacter(((cx & 0x1F) << 6) | (cy & 0x3F), null)
+            begin += 2
+          } else if (0xE0 <= cx && cx < 0xF0 && begin + 2 < end &&
+                     0x80 <= cy && cy < 0xC0 && ((cx & 0x0F) || (cy & 0x20)) &&
+                     0x80 <= cz && cz < 0xC0) {
+            // 3 bytes UTF-8
+            this.renderCharacter(((cx & 0x0F) << 12) | ((cy & 0x3F) << 6) | (cz & 0x3F), null)
+            begin += 3
+          } else if (0xF0 <= cx && cx < 0xF8 && begin + 3 < end &&
+                     0x80 <= cy && cy < 0xC0 && ((cx & 0x07) || (cy & 0x30)) &&
+                     0x80 <= cz && cz < 0xC0 &&
+                     0x80 <= cw && cw < 0xC0) {
+            // 4 bytes UTF-8
+            this.renderCharacter(((cx & 0x07) << 18) | ((cy & 0x3F) << 12) | ((cz & 0x3F) << 6) | (cw & 0x3F), null)
+            begin += 4
+          } else if (cx === 0xFE) {
+            // UTF-16? 未対応
+            return
+          } else {
+            // 不明
+            this.renderCharacter(0xFFFD, null)
+            begin += 1
+          }
+        } else {
+          let key = 0
+          const entry = this.G_BACK[this.GR]
+          if(!entry){ return }
 
-        for(let i = 0; i < entry.bytes; i++){
-          key <<= 8
-          key |= this.pes[begin + i] & 0x7F
+          for(let i = 0; i < entry.bytes; i++){
+            key <<= 8
+            key |= this.pes[begin + i] & 0x7F
+          }
+          this.renderCharacter(key, entry)
+          begin += entry.bytes
         }
-        this.renderCharacter(key, entry)
-        begin += entry.bytes
       } else if (this.pes[begin] === JIS8.NUL) {
         begin += 1
       } else if (this.pes[begin] === JIS8.BEL) {
@@ -720,7 +807,9 @@ export default class SVGProvider {
               this.DRCS_mapping.get(alphabet)?.set(ch, drcs)
             }
           }else{
-            const ch = CharacterCode & 0x7F7F
+            let ch = CharacterCode
+            // UCS の外字符号は "DRCS-0 の集合" で "EC区00点からF8区FF点までの3328字"
+            ch = 0xEC00 <= ch && ch <= 0xF8FF ? ch : (ch & 0x7F7F)
             this.DRCS_mapping.get(ALPHABETS.DRCS_0)?.set(ch, drcs)
           }
 
@@ -730,14 +819,14 @@ export default class SVGProvider {
     }
   }
 
-  private renderCharacter(key: number, entry: ALPHABET_ENTRY) {
+  private renderCharacter(key: number, entry: ALPHABET_ENTRY | null) {
     if (this.position_x < 0 || this.position_y < 0){
       this.move_absolute_dot(this.sdp_x, this.sdp_y + (this.ssm_y + this.svs));
     }
 
     if (this.svg === null) { return; }
 
-    if (entry.alphabet !== ALPHABETS.MACRO) {
+    if (entry?.alphabet !== ALPHABETS.MACRO) {
       if (!this.rendered) {
          this.svg.setAttribute('viewBox', `0 0 ${this.swf_x} ${this.swf_y}`)
       }
@@ -822,7 +911,8 @@ export default class SVGProvider {
       }
     }
 
-    if (entry.alphabet === ALPHABETS.KANJI) {
+    // !entry のとき key は Unicode のコードポイントとみなす
+    if (entry?.alphabet === ALPHABETS.KANJI) {
       const ch1 = ((key & 0xFF00) >> 8) - 0x21
       const ch2 = ((key & 0x00FF) >> 0) - 0x21
       const index = ch1 * (0x7E - 0x21 + 1) + ch2
@@ -842,28 +932,28 @@ export default class SVGProvider {
       }
 
       this.move_relative_pos(1, 0)
-    }else if(entry.alphabet === ALPHABETS.ASCII) {
+    }else if(entry?.alphabet === ALPHABETS.ASCII) {
       const index = key - 0x21
       const character = ASCII_MAPPING[index]
 
       this.renderFont(character)
 
       this.move_relative_pos(1, 0)
-    }else if(entry.alphabet === ALPHABETS.HIRAGANA) {
+    }else if(entry?.alphabet === ALPHABETS.HIRAGANA) {
       const index = key - 0x21
       const character = HIRAGANA_MAPPING[index]
 
       this.renderFont(character)
 
       this.move_relative_pos(1, 0)
-    }else if(entry.alphabet === ALPHABETS.KATAKANA) {
+    }else if(entry?.alphabet === ALPHABETS.KATAKANA) {
       const index = key - 0x21
       const character = KATAKANA_MAPPING[index]
 
       this.renderFont(character)
 
       this.move_relative_pos(1, 0)
-    }else if(entry.alphabet === ALPHABETS.MACRO) {
+    }else if(entry?.alphabet === ALPHABETS.MACRO) {
       if (key === 0x60){
         this.G_BACK = [
           G_SET_BY_ALPHABET.get(ALPHABETS.KANJI),
@@ -1011,8 +1101,13 @@ export default class SVGProvider {
       }
 
       return
+    } else if (!entry && (key < 0xEC00 || 0xF8FF < key)) { // Unicode (DRCS を除く)
+      this.renderFontFromUnicode(key)
+
+      this.move_relative_pos(1, 0)
     } else { // DRCS
-      const drcs = this.DRCS_mapping.get(entry.alphabet)?.get(key & 0x7F7F)
+      const drcs = entry ? this.DRCS_mapping.get(entry.alphabet)?.get(key & 0x7F7F) :
+                           this.DRCS_mapping.get(ALPHABETS.DRCS_0)?.get(key)
       if(!drcs){
         return
       }
@@ -1118,6 +1213,33 @@ export default class SVGProvider {
 
       this.move_relative_pos(1, 0)
     }
+  }
+
+  private renderFontFromUnicode(code: number): void {
+    let character
+    if (code >= 0x10000) {
+      // サロゲートペア
+      character = String.fromCharCode(((code - 0x10000) >> 10) | 0xD800,
+                                      ((code - 0x10000) & 0x03FF) | 0xDC00)
+    } else {
+      character = String.fromCharCode(code)
+    }
+
+    if (this.usePUA) {
+      if (!SVGProvider.unicodeToPUAMapping) {
+        SVGProvider.unicodeToPUAMapping = new Map()
+        for (let i = 0; i < ADDITIONAL_SYMBOLS_UNICODE_MAPPING.length; i++) {
+          const uni = ADDITIONAL_SYMBOLS_UNICODE_MAPPING[i]
+          const pua = ADDITIONAL_SYMBOLS_PUA_MAPPING[i]
+          if (uni !== pua && uni.length > 0 && pua.length > 0) {
+            SVGProvider.unicodeToPUAMapping.set(uni, pua)
+          }
+        }
+      }
+      character = SVGProvider.unicodeToPUAMapping.get(character) ?? character
+    }
+
+    this.renderFont(character)
   }
 
   private renderFont(character: string): void {
