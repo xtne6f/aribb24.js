@@ -361,7 +361,7 @@ export default class CanvasProvider {
       if(ctx){
         ctx.clearRect(0, 0, this.option_canvas.width, this.option_canvas.height)
 
-        if (this.render_canvas) {
+        if (this.render_canvas && this.render_canvas.width >= 1 && this.render_canvas.height >= 1) {
           if (!(option?.keepAspectRatio)) {
             ctx.drawImage(
               this.render_canvas,
