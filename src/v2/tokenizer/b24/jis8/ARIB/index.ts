@@ -125,7 +125,7 @@ export default class ARIBJapaneseJIS8Tokenizer extends ARIBB24JIS8Tokenizer {
     };
   }
 
-  public constructor(option?: ARIBB24JapaneseJIS8TokenizerOption) {
+  public constructor(ucs: boolean, option?: ARIBB24JapaneseJIS8TokenizerOption) {
     const USING_NORMAL_DICT = option?.usePUA ? ARIBJapaneseJIS8Tokenizer.NORMAL_DICT_USE_PUA : ARIBJapaneseJIS8Tokenizer.NORMAL_DICT_USE_UNICODE;
     super(0, 2,
       [USING_NORMAL_DICT.KANJI, USING_NORMAL_DICT.ASCII, USING_NORMAL_DICT.HIRAGANA, JAPAN_DRCS_DICTS.MACRO],
@@ -150,7 +150,8 @@ export default class ARIBJapaneseJIS8Tokenizer extends ARIBB24JIS8Tokenizer {
         '\uFF3F', // full
         /* LARGE CIRCLE */
         '\u25EF', // full
-      ])
+      ]),
+      ucs
     );
   }
 }

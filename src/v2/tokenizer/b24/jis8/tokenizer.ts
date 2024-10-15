@@ -135,14 +135,16 @@ export default abstract class ARIBB24JIS8Tokenizer implements ARIBB24Tokenizer {
   private character_dicts: Record<string, CharacterDictEntry>;
   private drcs_dicts: Record<string, DRCSDictEntry | MacroDictEntry>;
   private non_spacing: Set<string>;
+  private ucs: boolean;
 
-  public constructor(GL: 0 | 1 | 2 | 3, GR: 0 | 1 | 2 | 3, GB: [DictEntry, DictEntry, DictEntry, DictEntry], character_dicts: Record<string, CharacterDictEntry>, drcs_dicts: Record<string, DRCSDictEntry | MacroDictEntry>, non_spacing: Set<string>) {
+  public constructor(GL: 0 | 1 | 2 | 3, GR: 0 | 1 | 2 | 3, GB: [DictEntry, DictEntry, DictEntry, DictEntry], character_dicts: Record<string, CharacterDictEntry>, drcs_dicts: Record<string, DRCSDictEntry | MacroDictEntry>, non_spacing: Set<string>, ucs: boolean) {
     this.GL = GL;
     this.GR = GR;
     this.GB = GB;
     this.character_dicts = character_dicts;
     this.drcs_dicts = structuredClone(drcs_dicts);
     this.non_spacing = non_spacing;
+    this.ucs = ucs;
   }
 
   public tokenize(data: CaptionData): ARIBB24Token[] {
@@ -166,14 +168,18 @@ export default abstract class ARIBB24JIS8Tokenizer implements ARIBB24Tokenizer {
     const result: ARIBB24Token[] = [];
 
     while (!stream.isEmpty()) {
+      if (this.ucs && stream.exists(2) && stream.peekU16() >= 0xC280 && stream.peekU16() <= 0xC29F) {
+        // C1 control code of UTF-8
+        stream.readU8();
+      }
+
       if (0x20 < stream.peekU8() && stream.peekU8() < 0x7F) {
         let code = 0;
-        for (let i = 0; i < this.GB[this.GL].bytes; i++) {
+        const { type, bytes, dict } = this.ucs ? this.character_dicts.ASCII : this.GB[this.GL];
+        for (let i = 0; i < bytes; i++) {
           code <<= 8;
           code |= (stream.readU8() & 0x7F);
         }
-
-        const { type, dict } = this.GB[this.GL];
 
         switch (type) {
           case 'Character':
@@ -200,12 +206,57 @@ export default abstract class ARIBB24JIS8Tokenizer implements ARIBB24Tokenizer {
         continue;
       } else if (0xA0 < stream.peekU8() && stream.peekU8() < 0xFF) {
         let code = 0;
-        for (let i = 0; i < this.GB[this.GR].bytes; i++) {
-          code <<= 8;
-          code |= (stream.readU8() & 0x7F);
+        const { type, bytes, dict } = this.ucs ? this.drcs_dicts.DRCS_0 : this.GB[this.GR];
+        if (this.ucs) {
+          const cx = stream.readU8();
+          if (0xC2 <= cx && cx < 0xE0) {
+            const cy = stream.readU8();
+            if (0x80 <= cy && cy < 0xC0) {
+              // 2 bytes UTF-8
+              code = ((cx & 0x1F) << 6) | (cy & 0x3F);
+            }
+          } else if (0xE0 <= cx && cx < 0xF0) {
+            const cy = stream.readU8();
+            const cz = stream.readU8();
+            if (0x80 <= cy && cy < 0xC0 && ((cx & 0x0F) || (cy & 0x20)) &&
+                0x80 <= cz && cz < 0xC0) {
+              // 3 bytes UTF-8
+              code = ((cx & 0x0F) << 12) | ((cy & 0x3F) << 6) | (cz & 0x3F);
+            }
+          } else if (0xF0 <= cx && cx < 0xF8) {
+            const cy = stream.readU8();
+            const cz = stream.readU8();
+            const cw = stream.readU8();
+            if (0x80 <= cy && cy < 0xC0 && ((cx & 0x07) || (cy & 0x30)) &&
+                0x80 <= cz && cz < 0xC0 &&
+                0x80 <= cw && cw < 0xC0) {
+              // 4 bytes UTF-8
+              code = ((cx & 0x07) << 18) | ((cy & 0x3F) << 12) | ((cz & 0x3F) << 6) | (cw & 0x3F);
+            }
+          }
+          if (code < 0xEC00 || code > 0xF8FF) {
+            // non-DRCS
+            if (code > 0) {
+              const ch = String.fromCodePoint(code);
+              // conversion of UCS non-spacing character
+              const conv_ch = ch === '\u0301' ? '\u00B4' :
+                              ch === '\u0300' ? '\u0060' :
+                              ch === '\u0308' ? '\u00A8' :
+                              ch === '\u0302' ? '\u005E' :
+                              ch === '\u0305' ? '\u203E' :
+                              ch === '\u0332' ? '\u005F' :
+                              ch === '\u20DD' ? '\u25EF' : ch;
+              result.push(Character.from(conv_ch, conv_ch !== ch));
+            }
+            continue;
+          }
+        } else {
+          for (let i = 0; i < bytes; i++) {
+            code <<= 8;
+            code |= (stream.readU8() & 0x7F);
+          }
         }
 
-        const { type, dict } = this.GB[this.GR];
         switch (type) {
           case 'Character':
             if (dict.has(code)) {
@@ -740,7 +791,14 @@ export default abstract class ARIBB24JIS8Tokenizer implements ARIBB24Tokenizer {
             entry.dict.set(ch, DRCS.from(width, height, bits, binary));
           }else{
             const index = 0x40;
-            const ch = CharacterCode & 0x7F7F;
+            let ch = CharacterCode;
+            if (this.ucs) {
+              // "The Gaiji character code set shall be the DRCS-0 set"
+              // "3328 characters from Row EC, Cell 00 to Row F8, Cell FF"
+              if (ch < 0xEC00 || ch > 0xF8FF) { continue };
+            }else{
+              ch = ch & 0x7F7F;
+            }
 
             const entry = Object.values(this.drcs_dicts).find((value) => value.code === index);
             if (entry == null || entry.type !== 'DRCS') { continue };

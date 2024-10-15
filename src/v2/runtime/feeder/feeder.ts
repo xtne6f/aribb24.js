@@ -1,5 +1,5 @@
 import { ARIBB24ParserState, initialState, latenInitialState } from "../../parser/index";
-import datagroup, { CaptionLanguageInformation } from "../../tokenizer/b24/datagroup";
+import datagroup, { CaptionManagementTCS, CaptionLanguageInformation } from "../../tokenizer/b24/datagroup";
 import ARIBJapaneseJIS8Tokenizer from "../../tokenizer/b24/jis8/ARIB/index";
 import ARIBBrazilianJIS8Tokenizer from "../../tokenizer/b24/jis8/SBTVD/index";
 import ARIBB24Tokenizer from "../../tokenizer/b24/tokenizer";
@@ -35,23 +35,23 @@ export const FeederOption = {
   }
 }
 
-export const getTokenizeInformation = (language: string, option: FeederOption): [CaptionLanguageInformation['association'], ARIBB24Tokenizer, ARIBB24ParserState] | null => {
+export const getTokenizeInformation = (language: string, tcs: number, option: FeederOption): [CaptionLanguageInformation['association'], ARIBB24Tokenizer, ARIBB24ParserState] | null => {
   switch (option.recieve.association) {
-    case 'ARIB': return ['ARIB', new ARIBJapaneseJIS8Tokenizer({ usePUA: option.tokenizer.pua }), initialState];
-    case 'SBTVD': return ['SBTVD', new ARIBBrazilianJIS8Tokenizer(), latenInitialState];
+    case 'ARIB': return ['ARIB', new ARIBJapaneseJIS8Tokenizer(tcs === CaptionManagementTCS.UCS, { usePUA: option.tokenizer.pua }), initialState];
+    case 'SBTVD': return ['SBTVD', new ARIBBrazilianJIS8Tokenizer(tcs === CaptionManagementTCS.UCS), latenInitialState];
   }
 
   switch (language) {
     case 'jpn':
     case 'eng':
-      return ['ARIB', new ARIBJapaneseJIS8Tokenizer({ usePUA: option.tokenizer.pua }), initialState];
+      return ['ARIB', new ARIBJapaneseJIS8Tokenizer(tcs === CaptionManagementTCS.UCS, { usePUA: option.tokenizer.pua }), initialState];
     case 'spa':
     case 'por':
-      return ['SBTVD', new ARIBBrazilianJIS8Tokenizer(), latenInitialState];
+      return ['SBTVD', new ARIBBrazilianJIS8Tokenizer(tcs === CaptionManagementTCS.UCS), latenInitialState];
   }
 
   // Treat as ARIB-B24 JIS8
-  return ['UNKNOWN', new ARIBJapaneseJIS8Tokenizer({ usePUA: option.tokenizer.pua }), initialState];
+  return ['UNKNOWN', new ARIBJapaneseJIS8Tokenizer(tcs === CaptionManagementTCS.UCS, { usePUA: option.tokenizer.pua }), initialState];
 }
 
 export type FeederDecodingData = {
