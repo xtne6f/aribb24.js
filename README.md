@@ -83,6 +83,7 @@ yarn run build
         enableAutoInBandMetadataTextTrackDetection: !Hls.isSupported(), // FRAG_PARSING_METADATA instead of auto detection
     });
     // renderer.attachMedia(video, subtitleElement) also accepted
+    // renderer.attachMedia(null, subtitleElement) also accepted. In this case, you need to call renderer.onTimeupdate(currentTime) yourself.
     renderer.attachMedia(video);
 
     if (Hls.isSupported()) {

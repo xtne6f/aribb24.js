@@ -31,6 +31,9 @@ export default class CanvasID3Renderer {
   private media: HTMLVideoElement | null = null
   private id3Track: TextTrack | null = null
   private b24Track: TextTrack | null = null
+  private b24CueArray: TextTrackCue[] | null = null
+  private b24ActiveCueArray: TextTrackCue[] | null = null
+  private specifiedCurrentTime: number = 0
   private subtitleElement: HTMLElement | null = null
   private viewCanvas: HTMLCanvasElement | null = null
   private rawCanvas: HTMLCanvasElement | null = null
@@ -74,17 +77,20 @@ export default class CanvasID3Renderer {
     }
   }
 
-  public attachMedia(media: HTMLVideoElement, subtitleElement?: HTMLElement): void {
+  public attachMedia(media: HTMLVideoElement | null, subtitleElement?: HTMLElement): void {
     this.detachMedia()
+    if (!media && !subtitleElement) {
+      throw new Error('Invalid parameter')
+    }
     this.media = media
-    this.subtitleElement = subtitleElement ?? media.parentElement
+    this.subtitleElement = subtitleElement ?? media!.parentElement
 
-    this.media.addEventListener('canplay', this.onCanplayHandler)
+    this.media?.addEventListener('canplay', this.onCanplayHandler)
     if (this.rendererOption?.useHighResTimeupdate) {
-      this.media.addEventListener('play', this.onPlayHandler)
-      this.media.addEventListener('pause', this.onPauseHandler)
+      this.media?.addEventListener('play', this.onPlayHandler)
+      this.media?.addEventListener('pause', this.onPauseHandler)
     } else {
-      this.media.addEventListener('timeupdate', this.onTimeupdateHandler)
+      this.media?.addEventListener('timeupdate', this.onTimeupdateHandler)
     }
     this.prevCurrentTime = null;
 
@@ -343,7 +349,7 @@ export default class CanvasID3Renderer {
   }
 
   private addB24Cue (start_time: number, end_time: number, data: Uint8Array): boolean {
-    if (!this.b24Track) { return false; }
+    if (!this.b24Track && !this.b24CueArray) { return false; }
     if ((CanvasProvider.detect(data, this.rendererOption) ?? 0) === 0) { return false; }
 
     const CueClass = window.VTTCue ?? window.TextTrackCue
@@ -352,7 +358,19 @@ export default class CanvasID3Renderer {
     (b24_cue as any).data = data;
     (b24_cue as any).languageInfo = this.lastLanguageInfo;
 
-    if (window.VTTCue) {
+    if (!this.b24Track) {
+      const hasCue = this.b24CueArray!.some((target) => {
+        return target.startTime === start_time
+      })
+      if (hasCue) { return false; }
+
+      this.b24CueArray!.push(b24_cue)
+      for (let i = this.b24CueArray!.length - 1; i > 0 && this.b24CueArray![i - 1].startTime > start_time; i--) {
+        this.b24CueArray![i] = this.b24CueArray![i - 1]
+        this.b24CueArray![i - 1] = b24_cue
+      }
+      this.updateActiveCueArray()
+    } else if (window.VTTCue) {
       this.b24Track.addCue(b24_cue)
     } else if (window.TextTrackCue) {
       const hasCue = Array.prototype.some.call(this.b24Track.cues ?? [], (target) => {
@@ -379,7 +397,7 @@ export default class CanvasID3Renderer {
   }
 
   private onB24CueChange() {
-    if (!this.media || !this.b24Track) {
+    if (!this.b24Track && !this.b24CueArray) {
       this.onB24CueChangeDrawed = false
       return
     }
@@ -398,10 +416,11 @@ export default class CanvasID3Renderer {
       }
     }
 
-    if (this.b24Track.activeCues && this.b24Track.activeCues.length > 0) {
-      const lastCue = this.b24Track.activeCues[this.b24Track.activeCues.length - 1] as any
+    const activeCues = this.getActiveCues()
+    if (activeCues && activeCues.length > 0) {
+      const lastCue = activeCues[activeCues.length - 1] as any
 
-      if ((lastCue.startTime <= this.media.currentTime && this.media.currentTime <= lastCue.endTime) && !this.isOnSeeking) {
+      if ((lastCue.startTime <= this.getCurrentTime() && this.getCurrentTime() <= lastCue.endTime) && !this.isOnSeeking) {
         // なんか Win Firefox で Cue が endTime 過ぎても activeCues から消えない場合があった、バグ?
 
         const provider: CanvasProvider = new CanvasProvider(lastCue.data, lastCue.startTime, lastCue.languageInfo);
@@ -439,12 +458,27 @@ export default class CanvasID3Renderer {
         this.textContent = null;
       }
 
-      for (let i = this.b24Track.activeCues.length - 2; i >= 0; i--) {
-        const cue = this.b24Track.activeCues[i]
-        cue.endTime = Math.min(cue.endTime, lastCue.startTime)
-        if (cue.startTime === cue.endTime) { // .. if duplicate subtitle appeared
-          this.b24Track.removeCue(cue);
+      let modified = false
+      for (let i = activeCues.length - 2; i >= 0; i--) {
+        const cue = activeCues[i]
+        if (cue.endTime > lastCue.startTime) {
+          cue.endTime = lastCue.startTime
+          modified = true
         }
+        if (cue.startTime === cue.endTime) { // .. if duplicate subtitle appeared
+          if (this.b24CueArray) {
+            for (let j = this.b24CueArray.indexOf(cue); j < this.b24CueArray.length - 1; j++) {
+              this.b24CueArray[j] = this.b24CueArray[j + 1];
+            }
+            this.b24CueArray.pop();
+          } else {
+            this.b24Track!.removeCue(cue);
+          }
+          modified = true;
+        }
+      }
+      if (modified) {
+        this.updateActiveCueArray();
       }
     } else{
       this.onB24CueChangeDrawed = false
@@ -457,24 +491,30 @@ export default class CanvasID3Renderer {
     this.highResTimeupdatePollingId = window.requestAnimationFrame(this.onHighResTimeupdateHandler);
   }
 
-  private onTimeupdate() {
-    if (!this.media) { return; }
+  public onTimeupdate(currentTime?: number) {
+    if (currentTime != null) {
+      this.specifiedCurrentTime = currentTime;
+    }
+    if (!this.media && !this.subtitleElement) { return; }
+
+    this.updateActiveCueArray();
+
     if (this.prevCurrentTime == null) {
-      this.prevCurrentTime = this.media.currentTime;
+      this.prevCurrentTime = this.getCurrentTime();
       return;
     }
 
     if (!this.id3Track || !this.id3Track.cues || this.id3Track.cues.length === 0) {
-      this.prevCurrentTime = this.media.currentTime;
+      this.prevCurrentTime = this.getCurrentTime();
       return;
     }
 
     if (this.isOnSeeking) {
-      this.prevCurrentTime = this.media.currentTime;
+      this.prevCurrentTime = this.getCurrentTime();
       return;
     }
-    if (Math.abs(this.media.currentTime - this.prevCurrentTime) > DETECT_TIMEUPDATE_SEEKING_RANGE) {
-      this.prevCurrentTime = this.media.currentTime;
+    if (Math.abs(this.getCurrentTime() - this.prevCurrentTime) > DETECT_TIMEUPDATE_SEEKING_RANGE) {
+      this.prevCurrentTime = this.getCurrentTime();
       return;
     }
 
@@ -505,7 +545,7 @@ export default class CanvasID3Renderer {
     {
       let begin = 0, end = cues.length;
       while (begin + 1 < end) {
-        const currentTime = this.media.currentTime;
+        const currentTime = this.getCurrentTime();
         const middle = Math.floor((begin + end) / 2);
         const startTime = cues[middle].startTime;
 
@@ -519,7 +559,7 @@ export default class CanvasID3Renderer {
     }
 
     if (prevIndex === null || currIndex === null || prevIndex === currIndex){
-      this.prevCurrentTime = this.media.currentTime;
+      this.prevCurrentTime = this.getCurrentTime();
       return;
     }
 
@@ -539,7 +579,7 @@ export default class CanvasID3Renderer {
       }
     }
 
-    this.prevCurrentTime = this.media.currentTime;
+    this.prevCurrentTime = this.getCurrentTime();
   }
 
   private onCanplay() {
@@ -579,15 +619,15 @@ export default class CanvasID3Renderer {
   }
 
   private onResize() {
-    if (!this.media) {
+    if (!this.media && !this.subtitleElement) {
       return
     }
 
-    const style = window.getComputedStyle(this.media)
+    const style = window.getComputedStyle(this.media ?? this.subtitleElement!)
     const media_width = Number.parseInt(style.width) * window.devicePixelRatio
     const media_height = Number.parseInt(style.height) * window.devicePixelRatio
-    const video_width = this.media.videoWidth
-    const video_height = this.media.videoHeight
+    const video_width = this.media ? this.media.videoWidth : media_width;
+    const video_height = this.media ? this.media.videoHeight : media_height;
 
     if (this.viewCanvas) {
       this.viewCanvas.width = Math.round(media_width)
@@ -596,10 +636,6 @@ export default class CanvasID3Renderer {
     if (this.rawCanvas) {
       this.rawCanvas.width = video_width
       this.rawCanvas.height = video_height
-    }
-
-    if (!this.b24Track) {
-      return;
     }
 
     if (this.viewCanvas) {
@@ -619,10 +655,11 @@ export default class CanvasID3Renderer {
     if (!this.onB24CueChangeDrawed) { return }
 
     // onB24CueChange とほぼ同じだが、this.onB24CueChangeDrawed を変更しない
-    if (this.b24Track.activeCues && this.b24Track.activeCues.length > 0) {
-      const lastCue = this.b24Track.activeCues[this.b24Track.activeCues.length - 1] as any
+    const activeCues = this.getActiveCues()
+    if (activeCues && activeCues.length > 0) {
+      const lastCue = activeCues[activeCues.length - 1] as any
 
-      if ((lastCue.startTime <= this.media.currentTime && this.media.currentTime <= lastCue.endTime) && !this.isOnSeeking) {
+      if ((lastCue.startTime <= this.getCurrentTime() && this.getCurrentTime() <= lastCue.endTime) && !this.isOnSeeking) {
         // なんか Win Firefox で Cue が endTime 過ぎても activeCues から消えない場合があった、バグ?
 
         const provider: CanvasProvider = new CanvasProvider(lastCue.data, lastCue.startTime, lastCue.languageInfo);
@@ -650,7 +687,7 @@ export default class CanvasID3Renderer {
   }
 
   private onID3Addtrack(event: TrackEvent): void {
-    if (!this.media) {
+    if (!this.media && !this.subtitleElement) {
       return;
     }
 
@@ -667,6 +704,10 @@ export default class CanvasID3Renderer {
 
   private setupTrack(): void {
     if (!this.media) {
+      if (this.subtitleElement) {
+        this.b24CueArray = []
+        this.b24ActiveCueArray = []
+      }
       return
     }
 
@@ -713,7 +754,7 @@ export default class CanvasID3Renderer {
   }
 
   private setupCanvas(): void {
-    if (!this.media || !this.subtitleElement){
+    if (!this.subtitleElement){
       return
     }
     this.viewCanvas = document.createElement('canvas')
@@ -729,15 +770,15 @@ export default class CanvasID3Renderer {
 
     this.onResize()
 
-    this.subtitleElement.appendChild(this.viewCanvas)
+    this.subtitleElement.appendChild(this.viewCanvas);
 
-    this.media.addEventListener('resize', this.onResizeHandler)
+    (this.media ?? this.subtitleElement).addEventListener('resize', this.onResizeHandler)
 
     if (window.ResizeObserver) {
       this.resizeObserver = new ResizeObserver(() => {
         this.onResize()
       })
-      this.resizeObserver.observe(this.media)
+      this.resizeObserver.observe(this.media ?? this.subtitleElement)
     } else {
       window.addEventListener('resize', this.onResizeHandler)
 
@@ -745,7 +786,7 @@ export default class CanvasID3Renderer {
         this.mutationObserver = new MutationObserver(() => {
           this.onResize()
         })
-        this.mutationObserver.observe(this.media, {
+        this.mutationObserver.observe(this.media ?? this.subtitleElement, {
           attributes: true,
           attributeFilter: ['class', 'style']
         })
@@ -775,11 +816,13 @@ export default class CanvasID3Renderer {
     this.media?.textTracks.removeEventListener('addtrack', this.onID3AddtrackHandler)
 
     this.b24Track = this.id3Track = null
+    this.b24CueArray = this.b24ActiveCueArray = null
   }
 
   private cleanupCanvas(): void {
     window.removeEventListener('resize', this.onResizeHandler)
     this.media?.removeEventListener('resize', this.onResizeHandler)
+    this.subtitleElement?.removeEventListener('resize', this.onResizeHandler)
 
     if (this.resizeObserver) {
       this.resizeObserver.disconnect()
@@ -804,5 +847,44 @@ export default class CanvasID3Renderer {
     }
 
     this.viewCanvas = this.rawCanvas = null
+  }
+
+  private getCurrentTime(): number {
+    return this.media ? this.media.currentTime : this.specifiedCurrentTime;
+  }
+
+  private getActiveCues(): TextTrackCueList | TextTrackCue[] | null {
+    if (this.b24CueArray) {
+      if (!this.b24ActiveCueArray) {
+        this.b24ActiveCueArray = [];
+        for (let i = 0; i < this.b24CueArray.length && this.b24CueArray[i].startTime <= this.getCurrentTime(); i++) {
+          if (this.b24CueArray[i].endTime >= this.getCurrentTime()) {
+            this.b24ActiveCueArray.push(this.b24CueArray[i]);
+          }
+        }
+      }
+      return this.b24ActiveCueArray;
+    } else if (this.b24Track) {
+      return this.b24Track.activeCues;
+    }
+    return null;
+  }
+
+  private updateActiveCueArray(): void {
+    if (this.b24CueArray) {
+      const lastArray = this.b24ActiveCueArray!;
+      this.b24ActiveCueArray = null;
+      const currentArray = this.getActiveCues()!;
+      if (currentArray.length !== lastArray.length) {
+        this.onB24CueChange();
+      } else {
+        for (let i = 0; i < lastArray.length; i++) {
+          if (currentArray[i] !== lastArray[i]) {
+            this.onB24CueChange();
+            break;
+          }
+        }
+      }
+    }
   }
 }
