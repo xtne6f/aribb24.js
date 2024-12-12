@@ -336,9 +336,8 @@ export default class SVGRenderer {
     (b24_cue as any).languageInfo = this.lastLanguageInfo;
 
     if (!this.b24Track) {
-      const hasCue = this.b24CueArray!.some((target) => {
-        return target.startTime === start_time
-      })
+      const i = this.getCueArrayLowerBound(start_time)
+      const hasCue = i < this.b24CueArray!.length && this.b24CueArray![i].startTime === start_time
       if (hasCue) { return false; }
 
       this.b24CueArray!.push(b24_cue)
@@ -422,7 +421,7 @@ export default class SVGRenderer {
         }
         if (cue.startTime === cue.endTime) { // .. if duplicate subtitle appeared
           if (this.b24CueArray) {
-            for (let j = this.b24CueArray.indexOf(cue); j < this.b24CueArray.length - 1; j++) {
+            for (let j = this.getCueArrayLowerBound(cue.startTime); j < this.b24CueArray.length - 1; j++) {
               this.b24CueArray[j] = this.b24CueArray[j + 1];
             }
             this.b24CueArray.pop();
@@ -700,7 +699,9 @@ export default class SVGRenderer {
     if (this.b24CueArray) {
       if (!this.b24ActiveCueArray) {
         this.b24ActiveCueArray = [];
-        for (let i = 0; i < this.b24CueArray.length && this.b24CueArray[i].startTime <= this.getCurrentTime(); i++) {
+        // 180秒より長いキューに対しては不正確
+        let i = this.getCueArrayLowerBound(this.getCurrentTime() - 180);
+        for (; i < this.b24CueArray.length && this.b24CueArray[i].startTime <= this.getCurrentTime(); i++) {
           if (this.b24CueArray[i].endTime >= this.getCurrentTime()) {
             this.b24ActiveCueArray.push(this.b24CueArray[i]);
           }
@@ -729,5 +730,19 @@ export default class SVGRenderer {
         }
       }
     }
+  }
+
+  private getCueArrayLowerBound(startTime: number): number {
+    if (this.b24CueArray) {
+      let i = 0;
+      let n = this.b24CueArray.length;
+      while (n > i) {
+        const j = i + Math.floor((n - i) / 2);
+        if (this.b24CueArray[j].startTime < startTime) { i = j + 1; }
+        else { n = j; }
+      }
+      return i;
+    }
+    return -1;
   }
 }
